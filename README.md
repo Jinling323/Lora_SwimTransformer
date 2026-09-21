@@ -13,6 +13,50 @@ Official Implement of CVPR 2022 paper 'Boosting Crowd Counting via Multifaceted 
 5. Wait patiently for the program to finish.
 6. Then you will get a good counting model!
 
+## Two-stage Swin-Large training (clean → hazy)
+
+Prepare dataset roots with matching `.jpg` images and `.npy` annotations in
+the format expected by `datasets/crowd.py`:
+
+```text
+sha/
+├── clean/train/
+├── clean/val/
+├── hazy/train/
+└── mix/val/
+```
+
+The baseline stage updates the entire Swin-Large backbone and the original
+counting backend on `clean`. It requires the official
+`swin_large_patch4_window12_384_22k.pth` checkpoint. The LoRA stage loads the
+*entire* baseline model, freezes the Swin backbone, and trains LoRA plus the
+counting backend on `hazy/train`, validating on `mix/val`. Both stages keep the
+Bayesian density-map loss and use 384×384 crops.
+
+```bash
+python train.py --stage baseline --seed 42 \
+  --data-dir "/media/mmslab5090/SSD2/crowd counting test/sha/clean" \
+  --swin-pretrained /path/to/swin_large_patch4_window12_384_22k.pth \
+  --save-dir model --batch-size 1
+
+python train.py --stage lora --seed 42 \
+  --train-dir "/media/mmslab5090/SSD2/crowd counting test/sha/hazy" \
+  --val-dir "/media/mmslab5090/SSD2/crowd counting test/sha/mix" \
+  --baseline-checkpoint /path/to/baseline/best_model.pth \
+  --save-dir model --batch-size 1
+```
+
+The three dataset paths above are CLI defaults. In the LoRA stage, passing
+`--train-dir ''` or `--val-dir ''` selects `hazy/` or `mix/` beside `data-dir`.
+
+Runs are saved separately under `model/baseline/` and `model/lora/`. You may
+use a baseline epoch `.tar` checkpoint instead of `best_model.pth`. `--resume`
+is only for continuing an interrupted run *within the same stage*; it does
+not convert a baseline run into a LoRA run. Validation begins at epoch 0 by
+default, so `best_model.pth` can be produced during the baseline stage.
+The seed defaults to 42; use the same `--seed` value when resuming a stage.
+Training and validation show per-epoch `tqdm` progress bars.
+
 
 ## Test
 1. Dowload Dataset JHU++ or UCF-QNRF.

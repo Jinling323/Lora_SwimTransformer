@@ -164,24 +164,15 @@ def _add_lora_to_swin(module, rank, alpha, dropout):
 class SwinLargeTrans(nn.Module):
     """CCST Swin-Large backbone with the original density-counting backend."""
 
-    def __init__(self, pretrained_path="", lora_rank=8, lora_alpha=16.0,
-                 lora_dropout=0.0):
+    def __init__(self, stage="baseline", pretrained_path="", baseline_checkpoint="",
+                 lora_rank=8, lora_alpha=16.0, lora_dropout=0.0):
         super().__init__()
+        if stage not in ("baseline", "lora"):
+            raise ValueError(f"unknown Swin training stage: {stage}")
+        self.stage = stage
         self.backbone = _build_swin_large()
-        if pretrained_path:
+        if stage == "baseline" and pretrained_path:
             _load_swin_22k(self.backbone, pretrained_path)
-        else:
-            logging.warning(
-                "Swin-Large is randomly initialized. Supply --swin-pretrained "
-                "to use the ImageNet-22K initialization required by CCST."
-            )
-
-        # LoRA fine-tunes attention while preserving the pretrained backbone.
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = False
-        _add_lora_to_swin(
-            self.backbone, lora_rank, lora_alpha, lora_dropout
-        )
 
         # Swin-Large stage 4 has 1536 channels; the existing backend expects 512.
         self.channel_adapter = nn.Conv2d(1536, 512, kernel_size=1)
@@ -203,6 +194,26 @@ class SwinLargeTrans(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(128, 1, kernel_size=1),
         )
+
+        if stage == "lora":
+            if not baseline_checkpoint:
+                raise ValueError("LoRA stage requires a baseline checkpoint")
+            checkpoint = torch.load(baseline_checkpoint, map_location="cpu",
+                                    weights_only=False)
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+            else:
+                state_dict = checkpoint
+            if not isinstance(state_dict, dict):
+                raise ValueError("baseline checkpoint does not contain a model state dict")
+            if any("lora_" in key for key in state_dict):
+                raise ValueError("expected a baseline checkpoint without LoRA parameters")
+            # Strict loading also checks the adapter, Transformer, and density head.
+            self.load_state_dict(state_dict, strict=True)
+            for parameter in self.backbone.parameters():
+                parameter.requires_grad = False
+            _add_lora_to_swin(self.backbone, lora_rank, lora_alpha,
+                              lora_dropout)
 
     def forward(self, x):
         _, _, input_h, input_w = x.shape
@@ -232,10 +243,13 @@ class SwinLargeTrans(nn.Module):
         return torch.relu(x), features
 
 
-def swin_large_trans(pretrained_path="", lora_rank=8, lora_alpha=16.0,
+def swin_large_trans(stage="baseline", pretrained_path="",
+                     baseline_checkpoint="", lora_rank=8, lora_alpha=16.0,
                      lora_dropout=0.0):
     return SwinLargeTrans(
+        stage=stage,
         pretrained_path=pretrained_path,
+        baseline_checkpoint=baseline_checkpoint,
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,

@@ -1,6 +1,7 @@
 from utils.trainer import Trainer
 from utils.helper import Save_Handle, AverageMeter
 import os
+import random
 import sys
 import time
 import torch
@@ -17,6 +18,7 @@ from datasets.crowd import Crowd
 from losses.bay_loss import Bay_Loss
 from losses.post_prob import Post_Prob
 from math import ceil
+from tqdm.auto import tqdm
 
 
 def train_collate(batch):
@@ -26,6 +28,12 @@ def train_collate(batch):
     targets = transposed_batch[2]
     st_sizes = torch.FloatTensor(transposed_batch[3])
     return images, points, targets, st_sizes
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 class RegTrainer(Trainer):
@@ -44,10 +52,12 @@ class RegTrainer(Trainer):
         self.downsample_ratio = args.downsample_ratio
         if args.model_name == 'swin_large_trans' and args.crop_size != 384:
             raise ValueError('CCST Swin-Large requires --crop-size 384')
-        self.datasets = {x: Crowd(os.path.join(args.data_dir, x),
+        self.datasets = {x: Crowd((args.train_dir if x == 'train' else args.val_dir),
                                   args.crop_size,
                                   args.downsample_ratio,
                                   args.is_gray, x) for x in ['train', 'val']}
+        self.train_generator = torch.Generator().manual_seed(args.seed)
+        self.val_generator = torch.Generator().manual_seed(args.seed + 1)
         self.dataloaders = {x: DataLoader(self.datasets[x],
                                           collate_fn=(train_collate
                                                       if x == 'train' else default_collate),
@@ -55,11 +65,16 @@ class RegTrainer(Trainer):
                                           if x == 'train' else 1),
                                           shuffle=(True if x == 'train' else False),
                                           num_workers=args.num_workers*self.device_count,
-                                          pin_memory=(True if x == 'train' else False))
+                                          pin_memory=(True if x == 'train' else False),
+                                          worker_init_fn=seed_worker,
+                                          generator=(self.train_generator if x == 'train'
+                                                     else self.val_generator))
                             for x in ['train', 'val']}
         if args.model_name == 'swin_large_trans':
             self.model = swin.swin_large_trans(
+                stage=args.stage,
                 pretrained_path=args.swin_pretrained,
+                baseline_checkpoint=args.baseline_checkpoint,
                 lora_rank=args.lora_rank,
                 lora_alpha=args.lora_alpha,
                 lora_dropout=args.lora_dropout,
@@ -78,6 +93,11 @@ class RegTrainer(Trainer):
             suf = args.resume.rsplit('.', 1)[-1]
             if suf == 'tar':
                 checkpoint = torch.load(args.resume, self.device)
+                saved_stage = checkpoint.get('stage')
+                if (args.model_name == 'swin_large_trans' and saved_stage is not None
+                        and saved_stage != args.stage):
+                    raise ValueError('checkpoint stage {} does not match requested stage {}'.format(
+                        saved_stage, args.stage))
                 self.model.load_state_dict(checkpoint['model_state_dict'])
                 self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 self.start_epoch = checkpoint['epoch'] + 1
@@ -104,6 +124,8 @@ class RegTrainer(Trainer):
         for epoch in range(self.start_epoch, args.max_epoch):
             logging.info('-'*5 + 'Epoch {}/{}'.format(epoch, args.max_epoch - 1) + '-'*5)
             self.epoch = epoch
+            # Re-seed every epoch so resumed runs use the same shuffle/worker seeds.
+            self.train_generator.manual_seed(args.seed + epoch)
             # self.val_epoch()
             self.train_eopch()
             if epoch % args.val_epoch == 0 and epoch >= args.val_start:
@@ -117,7 +139,9 @@ class RegTrainer(Trainer):
         self.model.train()  # Set model to training mode
 
         # Iterate over data.
-        for step, (inputs, points, targets, st_sizes) in enumerate(self.dataloaders['train']):
+        progress = tqdm(self.dataloaders['train'], desc='Epoch {} train'.format(self.epoch),
+                        unit='batch', dynamic_ncols=True, leave=False)
+        for step, (inputs, points, targets, st_sizes) in enumerate(progress):
             inputs = inputs.to(self.device)
             st_sizes = st_sizes.to(self.device)
             gd_count = np.array([len(p) for p in points], dtype=np.float32)
@@ -148,6 +172,8 @@ class RegTrainer(Trainer):
                 epoch_loss.update(loss.item(), N)
                 epoch_mse.update(np.mean(res * res), N)
                 epoch_mae.update(np.mean(abs(res)), N)
+                progress.set_postfix(loss='{:.3f}'.format(epoch_loss.get_avg()),
+                                     mae='{:.2f}'.format(epoch_mae.get_avg()))
 
         logging.info('Epoch {} Train, Loss: {:.2f}, MSE: {:.2f} MAE: {:.2f}, Cost {:.1f} sec'
                      .format(self.epoch, epoch_loss.get_avg(), np.sqrt(epoch_mse.get_avg()), epoch_mae.get_avg(),
@@ -156,6 +182,7 @@ class RegTrainer(Trainer):
         save_path = os.path.join(self.save_dir, '{}_ckpt.tar'.format(self.epoch))
         torch.save({
             'epoch': self.epoch,
+            'stage': self.args.stage,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'model_state_dict': model_state_dic
         }, save_path)
@@ -166,7 +193,9 @@ class RegTrainer(Trainer):
         self.model.eval()  # Set model to evaluate mode
         epoch_res = []
         # Iterate over data.
-        for inputs, count, name in self.dataloaders['val']:
+        progress = tqdm(self.dataloaders['val'], desc='Epoch {} val'.format(self.epoch),
+                        unit='image', dynamic_ncols=True, leave=False)
+        for inputs, count, name in progress:
             inputs = inputs.to(self.device)
             if self.args.model_name == 'swin_large_trans':
                 # CCST evaluates 384x384 sub-images after resizing to 1152x768.
