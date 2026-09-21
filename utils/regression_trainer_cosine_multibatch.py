@@ -160,7 +160,7 @@ class RegTrainer(Trainer):
                     )
                     # Preserve the single-image token sum while averaging batches.
                     loss_c += cosine.sum(dim=1).mean()
-                loss += args.consistency_weight * loss_c
+                loss += self.args.consistency_weight * loss_c
 
                 self.optimizer.zero_grad()
                 loss.backward()
