@@ -217,14 +217,9 @@ class SwinLargeTrans(nn.Module):
 
     def forward(self, x):
         _, _, input_h, input_w = x.shape
-        if input_h != 384 or input_w != 384:
-            raise ValueError(
-                "CCST Swin-Large-Patch4-Window12 expects 384x384 input, "
-                f"but received {input_h}x{input_w}"
-            )
 
         # torchvision Swin keeps features in channels-last format.
-        x = self.backbone.features(x)  # [B, 12, 12, 1536]
+        x = self.backbone.features(x)  # [B, H/32, W/32, 1536]
         x = x.permute(0, 3, 1, 2).contiguous()
         x = self.channel_adapter(x)
 

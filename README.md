@@ -31,7 +31,9 @@ counting backend on `clean`. It requires the official
 `swin_large_patch4_window12_384_22k.pth` checkpoint. The LoRA stage loads the
 *entire* baseline model, freezes the Swin backbone, and trains LoRA plus the
 counting backend on `hazy/train`, validating on `mix/val`. Both stages keep the
-Bayesian density-map loss and use 384×384 crops.
+Bayesian density-map loss. The default crop is 256×256; torchvision pads Swin
+windows as needed, so the same 384-window checkpoint can initialize it. This
+is a crop-size adaptation, not an exact reproduction of CCST's 384×384 setup.
 
 ```bash
 python train.py --stage baseline --seed 42 \

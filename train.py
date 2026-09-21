@@ -1,9 +1,6 @@
 from utils.regression_trainer_cosine_multibatch import RegTrainer
 import argparse
 import os
-import random
-
-import numpy as np
 import torch
 args = None
 
@@ -11,15 +8,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train ')
     parser.add_argument('--model-name', default='swin_large_trans', help='the name of the model')
     parser.add_argument('--stage', choices=['baseline', 'lora'], default='baseline',
-                        help='baseline trains full Swin on clean; lora trains from baseline on hazy')
-    parser.add_argument('--data-dir', default='/media/mmslab5090/SSD2/crowd counting test/sha/clean',
-                        help='clean pretraining root containing train/ and val/')
-    parser.add_argument('--train-dir', default='/media/mmslab5090/SSD2/crowd counting test/sha/hazy',
-                        help='LoRA training root containing train/; empty value falls back to hazy/ beside data-dir')
-    parser.add_argument('--val-dir', default='/media/mmslab5090/SSD2/crowd counting test/sha/mix',
-                        help='LoRA validation root containing val/; empty value falls back to mix/ beside data-dir')
+                        help='baseline trains full Swin on clean; lora trains from baseline on mix')
+    parser.add_argument('--clean-data-dir', default='/media/mmslab5090/SSD2/crowd counting test/sha/clean',
+                        help='clean dataset root containing train/ and val/')
+    parser.add_argument('--mix-data-dir', default='/media/mmslab5090/SSD2/crowd counting test/sha/hazy',
+                        help='mix dataset root containing train/ and val/')
     parser.add_argument('--baseline-checkpoint', default='',
                         help='baseline best_model.pth or epoch checkpoint for LoRA initialization')
+    parser.add_argument('--data-dir', default=r'/media/mmslab5090/SSD2/crowd counting test/sha/clean',
+                        help='training data directory')
     parser.add_argument('--save-dir', default='model',
                         help='directory to save models.')
     parser.add_argument('--save-all', type=bool, default=False,
@@ -36,15 +33,13 @@ def parse_args():
                         help='max training epoch')
     parser.add_argument('--val-epoch', type=int, default=5,
                         help='the num of steps to log training information')
-    parser.add_argument('--val-start', type=int, default=0,
+    parser.add_argument('--val-start', type=int, default=600,
                         help='the epoch start to val')
     parser.add_argument('--batch-size', type=int, default=1,
                         help='train batch size')
     parser.add_argument('--device', default='0', help='assign device')
     parser.add_argument('--num-workers', type=int, default=8,
                         help='the num of training process')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='random seed for model, shuffling, and data augmentation')
     parser.add_argument('--swin-pretrained',
                         default='pre_models/swin_large_patch4_window12_384_22k.pth',
                         help='Swin-Large-Patch4-Window12 ImageNet-22K checkpoint')
@@ -73,41 +68,33 @@ def parse_args():
     args = parser.parse_args()
     if args.model_name == 'swin_large_trans':
         if args.stage == 'baseline':
+            if not args.clean_data_dir:
+                parser.error('--clean-data-dir is required for baseline stage')
             if not args.swin_pretrained or not os.path.isfile(args.swin_pretrained):
                 parser.error('baseline requires an existing --swin-pretrained checkpoint')
-            train_root = args.data_dir
-            val_root = args.data_dir
+            args.data_dir = args.clean_data_dir
         else:
+            if not args.mix_data_dir:
+                parser.error('--mix-data-dir is required for lora stage')
             if not args.baseline_checkpoint or not os.path.isfile(args.baseline_checkpoint):
                 parser.error('lora requires an existing --baseline-checkpoint')
-            data_parent = os.path.dirname(os.path.normpath(args.data_dir))
-            train_root = args.train_dir or os.path.join(data_parent, 'hazy')
-            val_root = args.val_dir or os.path.join(data_parent, 'mix')
-        args.train_dir = os.path.join(train_root, 'train')
-        args.val_dir = os.path.join(val_root, 'val')
-        for path in (args.train_dir, args.val_dir):
-            if not os.path.isdir(path):
-                parser.error('missing dataset directory: {}'.format(path))
+            args.data_dir = args.mix_data_dir
+        for split in ('train', 'val'):
+            if not os.path.isdir(os.path.join(args.data_dir, split)):
+                parser.error('missing dataset directory: {}'.format(
+                    os.path.join(args.data_dir, split)))
         if args.crop_size != 384:
             parser.error('Swin-Large-Patch4-Window12 requires --crop-size 384')
         if args.resume and args.stage == 'lora' and args.baseline_checkpoint == args.resume:
             parser.error('--resume must be a LoRA-stage checkpoint, not the baseline checkpoint')
         args.save_dir = os.path.join(args.save_dir, args.stage)
-    else:
-        args.train_dir = os.path.join(args.data_dir, 'train')
-        args.val_dir = os.path.join(args.data_dir, 'val')
     return args
 
 
 if __name__ == '__main__':
     args = parse_args()
+    torch.backends.cudnn.benchmark = True
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device.strip()  # set vis gpu
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
     trainer = RegTrainer(args)
     trainer.setup()
     trainer.train()

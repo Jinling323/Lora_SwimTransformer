@@ -50,8 +50,6 @@ class RegTrainer(Trainer):
             raise Exception("gpu is not available")
 
         self.downsample_ratio = args.downsample_ratio
-        if args.model_name == 'swin_large_trans' and args.crop_size != 384:
-            raise ValueError('CCST Swin-Large requires --crop-size 384')
         self.datasets = {x: Crowd((args.train_dir if x == 'train' else args.val_dir),
                                   args.crop_size,
                                   args.downsample_ratio,
@@ -198,13 +196,17 @@ class RegTrainer(Trainer):
         for inputs, count, name in progress:
             inputs = inputs.to(self.device)
             if self.args.model_name == 'swin_large_trans':
-                # CCST evaluates 384x384 sub-images after resizing to 1152x768.
-                inputs = F.interpolate(inputs, size=(768, 1152), mode='bilinear',
+                # Keep the validation canvas near CCST's 768x1152 size while
+                # making both dimensions exact multiples of the chosen crop.
+                crop_size = self.args.crop_size
+                val_h = max(crop_size, round(768 / crop_size) * crop_size)
+                val_w = max(crop_size, round(1152 / crop_size) * crop_size)
+                inputs = F.interpolate(inputs, size=(val_h, val_w), mode='bilinear',
                                        align_corners=False)
                 input_list = [
-                    inputs[:, :, top:top + 384, left:left + 384]
-                    for top in range(0, 768, 384)
-                    for left in range(0, 1152, 384)
+                    inputs[:, :, top:top + crop_size, left:left + crop_size]
+                    for top in range(0, val_h, crop_size)
+                    for left in range(0, val_w, crop_size)
                 ]
                 with torch.no_grad():
                     pre_count = sum(torch.sum(self.model(tile)[0])
